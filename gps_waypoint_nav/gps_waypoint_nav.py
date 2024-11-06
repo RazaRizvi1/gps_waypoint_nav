@@ -9,9 +9,11 @@ import math
 
 class DroneWaypointNavigator(Node):
     LINEAR_SCALE_FACTOR = 15000
-    VELOCITY_BOUND = 0.5
-    INITIAL_ALTITUDE = 5.0
-    HEADING_THRESHOLD = 4.0
+    VELOCITY_BOUND = 0.5        # in m/s
+    INITIAL_ALTITUDE = 5.0      # in m
+    HEADING_THRESHOLD = 4.0     # in degree
+    ALTITUDE_THRESHOLD = 0.1    # in m
+    WAYPOINT_THRESHOLD = 0.00001
 
     def __init__(self):
         super().__init__('drone_waypoint_navigator')
@@ -79,21 +81,16 @@ class DroneWaypointNavigator(Node):
         while rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.1)
 
-    def navigate_to_waypoint(self):
-        if self.current_gps is None or self.target_longitude is None or self.target_latitude is None or self.target_altitude is None:
-            self.get_logger().warning('GPS or waypoint data is not available yet.')
-            return
-        
-        self.get_logger().info('Navigating to waypoint...')
+    def reach_target_altitude(self, target_altitude):
+        self.get_logger().info(f'Reaching target altitude: {target_altitude}m...')
         velocity_command = Twist()
         
-        # Step 1: Reach the target altitude of 5m
         while True:
             with self.lock:
                 if self.current_gps is None:
                     continue
-                alt_diff = self.INITIAL_ALTITUDE - self.current_gps['altitude']
-                if abs(alt_diff) <= 0.1:
+                alt_diff = target_altitude - self.current_gps['altitude']
+                if abs(alt_diff) <= self.ALTITUDE_THRESHOLD:
                     break
                 velocity_command.linear.z = max(min(0.5 * alt_diff, self.VELOCITY_BOUND), -self.VELOCITY_BOUND)  # Proportional control
             self.cmd_vel_publisher.publish(velocity_command)
@@ -102,15 +99,38 @@ class DroneWaypointNavigator(Node):
         # Stop altitude movement
         velocity_command.linear.z = 0.0
         self.cmd_vel_publisher.publish(velocity_command)
-        
-        # Step 2: Turn towards the waypoint target
-        self.turn_to_target()
-        
-        # Step 3: Move towards the waypoint longitude and latitude
-        self.move_to_target()
+        self.get_logger().info('Reached target altitude.')
 
-    def turn_to_target(self):
+    def navigate_to_waypoint(self):
         if self.current_gps is None or self.target_longitude is None or self.target_latitude is None or self.target_altitude is None:
+            self.get_logger().warning('GPS or waypoint data is not available yet.')
+            return
+        
+        self.get_logger().info('Navigating to waypoint...')
+        
+        # Step 1: Reach the target altitude
+        self.reach_target_altitude(self.INITIAL_ALTITUDE)
+        
+        # Step 2: Calculate the desired heading to the target
+        with self.lock:
+            delta_long = self.target_longitude - self.current_gps['longitude']
+            delta_lat = self.target_latitude - self.current_gps['latitude']
+            desired_heading = math.degrees(math.atan2(delta_long, delta_lat))
+            if desired_heading < 0:
+                desired_heading += 360
+        
+        # Step 3: Turn towards the waypoint target
+        self.turn_to_target(desired_heading)
+        
+        # Step 4: Move towards the waypoint longitude and latitude
+        self.move_to_target(self.target_longitude, self.target_latitude)
+
+        # Step 5: Decend to the target altitude
+
+        self.reach_target_altitude(self.target_altitude)
+
+    def turn_to_target(self, desired_heading):
+        if self.current_gps is None:
             self.get_logger().warning('GPS or target data is not available yet for turning.')
             return
         
@@ -121,22 +141,9 @@ class DroneWaypointNavigator(Node):
             with self.lock:
                 if self.current_gps is None:
                     continue
-
-                # Calculate the desired heading to the target
-                delta_long = self.target_longitude - self.current_gps['longitude']
-                delta_lat = self.target_latitude - self.current_gps['latitude']
-                desired_heading = math.degrees(math.atan2(delta_long, delta_lat))
-
-                if desired_heading < 0:
-                    desired_heading += 360
+                
                 current_heading = self.current_gps['heading']
                 heading_diff = desired_heading - current_heading
-                
-                # Normalize the heading difference to the range [-180, 180]
-                # if heading_diff > 180:
-                #     heading_diff -= 360
-                # elif heading_diff < -180:
-                #     heading_diff += 360
                 
                 # If the heading difference is small enough, stop turning
                 if abs(heading_diff) <= self.HEADING_THRESHOLD:
@@ -152,7 +159,7 @@ class DroneWaypointNavigator(Node):
         self.cmd_vel_publisher.publish(velocity_command)
         self.get_logger().info('Reached desired heading.')
 
-    def move_to_target(self):
+    def move_to_target(self, target_longitude, target_latitude):
         self.get_logger().info('Moving towards target longitude and latitude...')
         velocity_command = Twist()
         
@@ -162,12 +169,12 @@ class DroneWaypointNavigator(Node):
                     continue
                 
                 # Calculate distance to the target
-                delta_long = self.target_longitude - self.current_gps['longitude']
-                delta_lat = self.target_latitude - self.current_gps['latitude']
+                delta_long = target_longitude - self.current_gps['longitude']
+                delta_lat = target_latitude - self.current_gps['latitude']
                 distance = math.sqrt(delta_long**2 + delta_lat**2)
                 
                 # If close enough to the target, stop moving
-                if distance <= 0.00001:  # Threshold for reaching the target
+                if distance <= self.WAYPOINT_THRESHOLD:  # Threshold for reaching the target
                     break
                 
                 # Move forward towards the target
@@ -179,11 +186,6 @@ class DroneWaypointNavigator(Node):
                     desired_heading += 360
                 current_heading = self.current_gps['heading']
                 heading_diff = desired_heading - current_heading
-                
-                # if heading_diff > 180:
-                #     heading_diff -= 360
-                # elif heading_diff < -180:
-                #     heading_diff += 360
                 
                 if abs(heading_diff) > self.HEADING_THRESHOLD:
                     # Stop forward movement and correct heading
@@ -201,7 +203,6 @@ class DroneWaypointNavigator(Node):
         velocity_command.angular.z = 0.0
         self.cmd_vel_publisher.publish(velocity_command)
         self.get_logger().info('Reached target location.')
-
 
 def main(args=None):
     rclpy.init(args=args)
