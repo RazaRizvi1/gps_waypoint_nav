@@ -129,6 +129,9 @@ class DroneWaypointNavigator(Node):
 
         self.reach_target_altitude(self.target_altitude)
 
+        # Step 6: Rotate to target heading
+        self.turn_to_target(224.89999389648438)
+
     def turn_to_target(self, desired_heading):
         if self.current_gps is None:
             self.get_logger().warning('GPS or target data is not available yet for turning.')
