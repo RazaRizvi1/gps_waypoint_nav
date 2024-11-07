@@ -9,11 +9,12 @@ import math
 
 class DroneWaypointNavigator(Node):
     LINEAR_SCALE_FACTOR = 15000
+    ALT_VELOCITY_BOUND = 1.0    # in m/s
     VELOCITY_BOUND = 0.5        # in m/s
-    INITIAL_ALTITUDE = 5.0      # in m
-    HEADING_THRESHOLD = 4.0     # in degree
+    INITIAL_ALTITUDE = 20.0     # in m
+    HEADING_THRESHOLD = 2.0     # in degree
     ALTITUDE_THRESHOLD = 0.1    # in m
-    WAYPOINT_THRESHOLD = 0.00001
+    WAYPOINT_THRESHOLD = 0.000007
 
     def __init__(self):
         super().__init__('drone_waypoint_navigator')
@@ -26,7 +27,7 @@ class DroneWaypointNavigator(Node):
             10)
         
         self.waypoint_subscription = self.create_subscription(
-            NavSatFix,
+            Float64MultiArray,
             '/waypoint',
             self.waypoint_callback,
             10)
@@ -39,6 +40,7 @@ class DroneWaypointNavigator(Node):
         self.target_altitude = None  # Target altitude is fixed at 5m
         self.target_longitude = None
         self.target_latitude = None
+        self.target_heading = None
         
         # Lock for thread safety
         self.lock = threading.Lock()
@@ -52,6 +54,12 @@ class DroneWaypointNavigator(Node):
         self.navigation_thread = None
 
     def gps_callback(self, msg):
+
+        # Ensure the GPS data has the correct number of elements
+        if len(msg.data) < 4:
+            self.get_logger().error('GPS data does not have enough elements. Expected 4.')
+            return
+    
         # Update the current GPS data: Lon, Lat, Alt, heading
         with self.lock:
             self.current_gps = {
@@ -63,11 +71,17 @@ class DroneWaypointNavigator(Node):
         #self.get_logger().info(f'Current GPS: {self.current_gps}')
 
     def waypoint_callback(self, msg):
+
+        if len(msg.data) < 4:
+            self.get_logger().error('Waypoint data does not have enough elements. Expected 4.')
+            return
+        
         # When a waypoint is received, set the target longitude and latitude
         with self.lock:
-            self.target_longitude = msg.longitude
-            self.target_latitude = msg.latitude
-            self.target_altitude = msg.altitude
+            self.target_longitude = msg.data[0]
+            self.target_latitude = msg.data[1]
+            self.target_altitude = msg.data[2]
+            self.target_heading = msg.data[3]
 
         # self.get_logger().info(f'Waypoint received with target longitude: {self.target_longitude}, latitude: {self.target_latitude}')
         
@@ -92,7 +106,7 @@ class DroneWaypointNavigator(Node):
                 alt_diff = target_altitude - self.current_gps['altitude']
                 if abs(alt_diff) <= self.ALTITUDE_THRESHOLD:
                     break
-                velocity_command.linear.z = max(min(0.5 * alt_diff, self.VELOCITY_BOUND), -self.VELOCITY_BOUND)  # Proportional control
+                velocity_command.linear.z = max(min(0.5 * alt_diff, self.ALT_VELOCITY_BOUND), -self.ALT_VELOCITY_BOUND)
             self.cmd_vel_publisher.publish(velocity_command)
             time.sleep(0.1)
         
@@ -125,12 +139,12 @@ class DroneWaypointNavigator(Node):
         # Step 4: Move towards the waypoint longitude and latitude
         self.move_to_target(self.target_longitude, self.target_latitude)
 
+        # Step 6: Rotate to target heading
+        self.turn_to_target(self.target_heading)
+        
         # Step 5: Decend to the target altitude
-
         self.reach_target_altitude(self.target_altitude)
 
-        # Step 6: Rotate to target heading
-        self.turn_to_target(224.89999389648438)
 
     def turn_to_target(self, desired_heading):
         if self.current_gps is None:
@@ -148,16 +162,13 @@ class DroneWaypointNavigator(Node):
                 current_heading = self.current_gps['heading']
                 heading_diff = desired_heading - current_heading
                 
-                # If the heading difference is small enough, stop turning
                 if abs(heading_diff) <= self.HEADING_THRESHOLD:
                     break
                 
-                # Apply proportional control to turn towards the desired heading
                 velocity_command.angular.z = abs(max(min(0.01 * heading_diff, self.VELOCITY_BOUND), -self.VELOCITY_BOUND))
             self.cmd_vel_publisher.publish(velocity_command)
             time.sleep(0.1)
         
-        # Stop publishing angular velocity
         velocity_command.angular.z = 0.0
         self.cmd_vel_publisher.publish(velocity_command)
         self.get_logger().info('Reached desired heading.')
